@@ -5,13 +5,15 @@ A Rust CLI tool and library for compressing retro ROM files into a deterministic
 ## Why
 
 Many retro emulators can run compressed ROMs by decompressing archives (e.g. .zip) into memory.
-However, archive formats cannot guarantee that identical ROM content produces identical file hashes — the compression algorithm, ROM file name, and modified date all affect the output hash.
+However, archive formats cannot guarantee that identical ROM content produces identical file hashes — the compression algorithm, ROM file name, and modified date all affect the output hash. This also has implications for other space saving techniques like hardlinking.
 
-zrom solves this by directly compressing the ROM file content with zstd using strict, fixed parameters. The result is:
+zrom aims to solve this by directly compressing the ROM file content with zstd using strict, fixed parameters. The result is:
 
 - **Deterministic** — identical input always produces identical output
-- **File name independent** — two identical inputs with different names will generate the same output and hash
-- **Fast lossless compression** — uses the Zstandard (zstd) algorithm producing a single zstd frame
+- **File name independent** — different names
+- **Fast decompression** — quick decompression means games will
+
+This is a proof of concept, a proposal for how directly compressing ROMs can work. This would require emulator updates to decompress and read these files. Right now I do not believe any do so.
 
 ## Format
 
@@ -69,13 +71,6 @@ zrom unpack "Game.ext.zst"
 # Output: "Game.ext"
 ```
 
-### Verify integrity
-
-```bash
-zrom verify "Game.ext.zst"
-# Output: Game.ext.zst  OK  (1.2 MB compressed)
-```
-
 ### Options
 
 | Flag | Description |
@@ -125,5 +120,3 @@ A conformant `zrom` file must satisfy:
 - Frame footer xxHash Checksum is present and valid
 - Has one zstd frame
 - File mtime is the console's worldwide release date at midnight UTC as listed in [extensions.rs](src/extensions.rs)
-
-Use `zrom verify` to check for conformancy.

@@ -1,16 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use clap::{Parser, Subcommand};
 use rayon::{prelude::*};
-use walkdir::WalkDir;
-use globset::{Glob, GlobSetBuilder};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-use zrom::benchmark::{benchmark_files};
-use zrom::compression::{zrom_pack, compressed_path};
+use zrom::benchmark::{benchmark_files, BenchmarkResult};
+use zrom::compression::{zrom_pack, get_zrom_path};
 use zrom::decompression::{unpack, decompressed_path, extract_archive};
 use zrom::extensions::{get_allowed_rom_ext, get_rom_ext_data, is_archive};
-use zrom::core::set_date;
+use zrom::core::{set_date, scan_directory};
 use zrom::{ZromError};
 
 #[derive(Parser)]
@@ -18,18 +16,6 @@ use zrom::{ZromError};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-
-    /// Overwrite existing files
-    #[arg(short, long)]
-    force: bool,
-
-    /// Remove source files
-    #[arg(short, long)]
-    remove: bool,
-
-    /// Print what would happen without changes
-    #[arg(long)]
-    dry_run: bool,
 }
 
 #[derive(Subcommand)]
@@ -38,16 +24,35 @@ enum Commands {
     Pack {
         /// File or directory to compress
         inputs: Vec<PathBuf>,
+
+        /// Overwrite existing files
+        #[arg(short, long)]
+        force: bool,
+
+        /// Remove source files
+        #[arg(short, long)]
+        remove: bool,
+
+        /// Print what would happen without changes
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Decompress zrom format ROM(s)
     Unpack {
         /// File or directory to decompress
         inputs: Vec<PathBuf>,
-    },
-    /// Validate zrom formatting without decompressing
-    Validate {
-        /// File or directory to validate
-        inputs: Vec<PathBuf>,
+
+        /// Overwrite existing files
+        #[arg(short, long)]
+        force: bool,
+
+        /// Remove source files
+        #[arg(short, long)]
+        remove: bool,
+
+        /// Print what would happen without changes
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Benchmark compression and decompression performance
     Benchmark {
@@ -64,37 +69,14 @@ struct JobResult {
     is_dry_run: bool,
 }
 
-fn scan_directory(path: &Path, extensions: &[&str]) -> Vec<PathBuf> {
-    if path.is_dir() {
-        let mut builder = GlobSetBuilder::new();
-        for ext in extensions {
-            // Support case-insensitive globbing where possible
-            builder.add(Glob::new(&format!("*.{}", ext)).unwrap());
-        }
-        let globset = builder.build().unwrap();
-        
-        WalkDir::new(path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .filter(|e| !globset.matches(e.path().file_name().unwrap()).is_empty())
-            .map(|e| e.path().to_path_buf())
-            .collect()
-    } else if path.exists() {
-        vec![path.to_path_buf()]
-    } else {
-        vec![]
-    }
-}
-
-fn run_pack(cli: &Cli, inputs: &[PathBuf]) {
+fn run_pack(inputs: &[PathBuf], force: bool, remove: bool, dry_run: bool) {
     let known_exts= get_allowed_rom_ext();
     let files: Vec<PathBuf> = inputs.iter()
         .flat_map(|p| scan_directory(p, &known_exts))
         .collect();
 
     if files.is_empty() {
-        error!("No supported ROM files found. Supported: {:?}", known_exts);
+        error!("No supported ROM files found");
         return;
     }
     let results: Vec<_> = files.par_iter().flat_map(|input| {
@@ -122,30 +104,29 @@ fn run_pack(cli: &Cli, inputs: &[PathBuf]) {
                 return JobResult { input: rom, output: None, error: Some(ZromError::NoExtension), stats: None, is_dry_run: false };
             };
 
-            let out_path = compressed_path(r);
+            let out_path = get_zrom_path(r);
 
-            if cli.dry_run {
+            if dry_run {
                 return JobResult { input: rom, output: Some(out_path), error: None, stats: None, is_dry_run: true };
             }
             
-            if !cli.force && out_path.exists() {
+            if !force && out_path.exists() {
                 return JobResult { input: rom, output: Some(out_path.clone()), error: Some(ZromError::OutputExists(out_path)), stats: None, is_dry_run: false };
             }
 
             match zrom_pack(&r, &out_path) {
                 Ok(stats) => {
-                    if cli.remove {
+                    if remove {
                         if let Err(e) = std::fs::remove_file(r) {
                             return JobResult { input: rom, output: Some(out_path), error: Some(ZromError::Io(e.to_string())), stats: None, is_dry_run: false };
                         }
                     }
 
-                    let (name, date) = (data.name, data.release_date);
-                    if let Err(e) = set_date(&out_path, date) {
-                        ZromError::Io(e.to_string());
+                    if let Err(e) = set_date(&out_path, data.release_date) {
+                        return JobResult { input: rom, output: Some(out_path), error: Some(e), stats: None, is_dry_run: false };
                     }
 
-                    info!("Packed: {} [{}]", out_path.display(), name);
+                    info!("Packed: {} [{}]", out_path.display(), data.name);
                     JobResult { input: rom, output: Some(out_path), error: None, stats: Some((stats.input_bytes, stats.output_bytes)), is_dry_run: false }
                 }
                 Err(e) => JobResult { input: rom, output: Some(out_path), error: Some(e), stats: None, is_dry_run: false },
@@ -155,30 +136,34 @@ fn run_pack(cli: &Cli, inputs: &[PathBuf]) {
     print_results(results);
 }
 
-fn run_unpack(cli: &Cli, inputs: &[PathBuf]) {
-let files: Vec<PathBuf> = inputs.iter()
+fn run_unpack(inputs: &[PathBuf], force: bool, remove: bool, dry_run: bool) {
+    let files: Vec<PathBuf> = inputs.iter()
         .flat_map(|p| scan_directory(p, &["zst"]))
         .collect();
 
     if files.is_empty() {
-        error!("No files found");
+        error!("No zrom files found");
         return;
     }
 
     let results: Vec<_> = files.par_iter().map(|input| {
         let output = decompressed_path(input);
 
-        if !cli.force && output.exists() {
+        if !force && output.exists() {
             return JobResult { input: input.clone(), output: Some(output.clone()), error: Some(ZromError::OutputExists(output)), stats: None, is_dry_run: false };
         }
 
-        if cli.dry_run {
+        if dry_run {
             return JobResult { input: input.clone(), output: Some(output), error: None, stats: None, is_dry_run: true };
         }
 
         match unpack(input, &output) {
             Ok(stats) => {
-                if cli.remove { let _ = std::fs::remove_file(input); }
+                if remove {
+                    if let Err(e) = std::fs::remove_file(input) {
+                        return JobResult { input: input.clone(), output: Some(output), error: Some(ZromError::Io(e.to_string())), stats: None, is_dry_run: false };
+                    }
+                }
                 JobResult { input: input.clone(), output: Some(output), error: None, stats: Some((stats.input_bytes, stats.output_bytes)), is_dry_run: false }
             }
             Err(e) => JobResult { input: input.clone(), output: Some(output), error: Some(e), stats: None, is_dry_run: false },
@@ -186,25 +171,6 @@ let files: Vec<PathBuf> = inputs.iter()
     }).collect();
 
     print_results(results);
-}
-
-fn run_validate(inputs: &[PathBuf]) {
-    let files: Vec<PathBuf> = inputs.iter()
-        .flat_map(|p| scan_directory(p, &["zst"]))
-        .collect();
-
-    if files.is_empty() {
-        warn!("No files found");
-        return;
-    }
-
-    let results = zrom::validation::validate_zroms(&files);
-    zrom::validation::print_results(&results);
-    if results.iter().any(|r| r.status.is_err()) {
-        error!("Validation completed with errors.");
-    } else {
-        info!("All files validated.");
-    }
 }
 
 fn run_benchmark(inputs: &[PathBuf]) {
@@ -219,7 +185,13 @@ fn run_benchmark(inputs: &[PathBuf]) {
     }
 
     match benchmark_files(&files) {
-        Ok(_) => { info!("Benchmark completed successfully") }
+        Ok(results) => {
+            if let Err(e) = BenchmarkResult::save_benchmark(&results) {
+                error!("Failed to save benchmark results: {}", e);
+            } else {
+                info!("Benchmark completed successfully");
+            }
+        }
         Err(e) => { error!("Benchmark failed: {}", e) }
     }
 }
@@ -284,9 +256,8 @@ fn main() {
     let cli = Cli::parse();
     
     match &cli.command {
-        Commands::Pack { inputs } => run_pack(&cli, inputs),
-        Commands::Unpack { inputs } => run_unpack(&cli, inputs),
-        Commands::Validate { inputs } => run_validate(inputs),
+        Commands::Pack { inputs, force, remove, dry_run } => run_pack(inputs, *force, *remove, *dry_run),
+        Commands::Unpack { inputs, force, remove, dry_run } => run_unpack(inputs, *force, *remove, *dry_run),
         Commands::Benchmark { inputs} => run_benchmark(inputs),
     }
 }

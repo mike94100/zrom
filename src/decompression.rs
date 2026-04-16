@@ -95,6 +95,57 @@ fn extract_rar(archive: &Path, dest: &Path) -> Result<Vec<PathBuf>, ZromError> {
     Ok(files)
 }
 
+/// Decompress Gzip
+pub fn unpack_gzip(input: &Path, output: &Path) -> Result<Stats, ZromError> {
+    let input_bytes = input.metadata()?.len();
+    let mut decoder = flate2::read::GzDecoder::new(File::open(input)?);
+    io::copy(&mut decoder, &mut File::create(output)?)?;
+    let output_bytes = output.metadata()?.len();
+    Ok(Stats { input_bytes, output_bytes })
+}
+
+/// Decompress XZ
+pub fn unpack_xz(input: &Path, output: &Path) -> Result<Stats, ZromError> {
+    let input_bytes = input.metadata()?.len();
+    let mut decoder = xz2::read::XzDecoder::new(File::open(input)?);
+    io::copy(&mut decoder, &mut File::create(output)?)?;
+    let output_bytes = output.metadata()?.len();
+    Ok(Stats { input_bytes, output_bytes })
+}
+
+/// Decompress Zip archive to directory
+pub fn unpack_zip_dir(input: &Path, output_dir: &Path) -> Result<(), ZromError> {
+    let file = File::open(input)?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| ZromError::Io(e.to_string()))?;
+    archive.extract(output_dir).map_err(|e| ZromError::Io(e.to_string()))?;
+    Ok(())
+}
+
+/// Decompress 7z
+pub fn unpack_7z(input: &Path, output_dir: &Path) -> Result<Stats, ZromError> {
+    let input_bytes = input.metadata()?.len();
+    sevenz_rust2::decompress_file(input, output_dir).map_err(|e| ZromError::Io(format!("7z error: {}", e)))?;
+    let output_bytes = 0; // Folder-based decompression makes size calculation tricky for benchmark stats
+    Ok(Stats { input_bytes, output_bytes })
+}
+
+/// Decompress Tar.zst
+pub fn unpack_tar_zst(input: &Path, output: &Path) -> Result<Stats, ZromError> {
+    let input_bytes = input.metadata()?.len();
+    let mut archive = tar::Archive::new(zstd::Decoder::new(File::open(input)?)?);
+    let mut entry = archive.entries()?.next().ok_or(ZromError::Zstd("Tar empty".to_string()))??;
+    io::copy(&mut entry, &mut File::create(output)?)?;
+    let output_bytes = output.metadata()?.len();
+    Ok(Stats { input_bytes, output_bytes })
+}
+
+/// Decompress Tar.zst archive to directory
+pub fn unpack_tar_zst_dir(input: &Path, output_dir: &Path) -> Result<(), ZromError> {
+    let mut archive = tar::Archive::new(zstd::Decoder::new(File::open(input)?)?);
+    archive.unpack(output_dir).map_err(|e| ZromError::Io(e.to_string()))?;
+    Ok(())
+}
+
 pub fn extract_archive(archive: &Path, dest: &Path) -> Result<Vec<PathBuf>, ZromError> {
     let ext = archive.extension()
         .and_then(|e| e.to_str())

@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 use filetime::{FileTime, set_file_times};
+use walkdir::WalkDir;
+use globset::{Glob, GlobSetBuilder};
 
 #[derive(Debug, Clone)]
 pub enum ZromError {
@@ -55,4 +57,28 @@ pub fn date_to_unix_secs(y: i32, m: u32, d: u32) -> i64 {
     };
     let epoch = jdn(1970, 1, 1);
     (jdn(y as i64, m as i64, d as i64) - epoch) * 86_400
+}
+
+/// Find files in a directory matching specific extensions
+pub fn scan_directory(path: &Path, extensions: &[&str]) -> Vec<PathBuf> {
+    if path.is_dir() {
+        let mut builder = GlobSetBuilder::new();
+        for ext in extensions {
+            // Support case-insensitive globbing where possible
+            builder.add(Glob::new(&format!("*.{}", ext)).unwrap());
+        }
+        let globset = builder.build().unwrap();
+        
+        WalkDir::new(path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| !globset.matches(e.path().file_name().unwrap()).is_empty())
+            .map(|e| e.path().to_path_buf())
+            .collect()
+    } else if path.exists() {
+        vec![path.to_path_buf()]
+    } else {
+        vec![]
+    }
 }
