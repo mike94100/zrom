@@ -99,26 +99,25 @@ pub static ARCHIVE_EXTENSIONS: &[&str] = &["zip", "7z", "rar"];
 /// Returns the ROM extension data for a ROM_Extension if the file matches
 /// *.{ROM_Extension}.zst
 pub fn get_rom_ext_data(filepath: &Path) -> Option<&'static ROMExtension> {
-    let ext = get_rom_ext(filepath)?;   
+    let filename = filepath.file_name()?.to_str()?;
+    // Support both raw ROMs and compressed zroms for system identification
+    let stem = filename.strip_suffix(".zst").unwrap_or(filename);
+    
+    let dot_index = stem.rfind('.')?;
+    let ext = &stem[dot_index + 1..];
+
     // Check if this extension is a valid ROM extension
     ROM_EXTENSIONS.iter().find(|rom| rom.extension == ext)
 }
 /// Returns the blocked extension data for a Blocked_Extension if the file matches
 /// *.{Blocked_Extension}
 pub fn get_blocked_ext_data(filepath: &Path) -> Option<&'static BlockedExtension> {
-    let ext = get_rom_ext(filepath)?;   
+    let filename = filepath.file_name()?.to_str()?;
+    let dot_index = filename.rfind('.')?;
+    let ext = &filename[dot_index + 1..];
+
     // Check if this extension is a valid ROM extension
     BLOCKED_EXTENSIONS.iter().find(|rom| rom.extension == ext)
-}
-
-/// Get the extension of a file path -> *.{ext}
-fn get_rom_ext(filepath: &Path) -> Option<&str> {
-    let filename = filepath.file_name()?.to_str()?;
-    let base_name = filename.strip_suffix(".zst")?;
-    
-    // Return the extension from the base name
-    let dot_index = base_name.rfind('.')?;
-    Some(&base_name[dot_index + 1..])
 }
 
 /// Returns true if the extension is an allowed archive
@@ -131,5 +130,6 @@ pub fn is_archive(filepath: &Path) -> Option<bool> {
 
 /// Returns true if file matches *.{ROM_Extension}.zst
 pub fn is_zrom(filepath: &Path) -> bool {
-    get_rom_ext_data(filepath).is_some()
+    filepath.extension().and_then(|e| e.to_str()) == Some("zst") 
+        && get_rom_ext_data(filepath).is_some()
 }
